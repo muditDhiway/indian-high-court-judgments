@@ -28,7 +28,8 @@ logger.setLevel("INFO")
 reader = easyocr.Reader(["en"])
 
 root_url = "https://judgments.ecourts.gov.in"
-output_dir = Path("./data")
+# output_dir = Path("./data")
+output_dir = None  # Set this to the desired output directory path
 START_DATE = "2008-01-01"
 
 
@@ -166,10 +167,10 @@ def generate_tasks(
             yield CourtDateTask(code, from_date, to_date)
 
 
-def process_task(task):
+def process_task(task, output_dir):
     """Process a single court-date task"""
     try:
-        downloader = Downloader(task)
+        downloader = Downloader(task, output_dir)
         downloader.download()
     except Exception as e:
         court_codes = get_court_codes()
@@ -179,7 +180,7 @@ def process_task(task):
         traceback.print_exc()
 
 
-def run(court_codes=None, start_date=None, end_date=None, day_step=1, max_workers=2):
+def run(court_codes=None, start_date=None, end_date=None, day_step=1, max_workers=2, output_dir=None):
     """
     Run the downloader with optional parameters using Python's multiprocessing
     with a generator that yields tasks on demand.
@@ -191,7 +192,7 @@ def run(court_codes=None, start_date=None, end_date=None, day_step=1, max_worker
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # map automatically consumes the iterator and processes tasks in parallel
         # it returns results in the same order as the input iterator
-        for i, result in enumerate(executor.map(process_task, tasks)):
+        for i, result in enumerate(executor.map(lambda task: process_task(task, output_dir), tasks)):
             # process_task doesn't return anything, so we're just tracking progress
             logger.info(f"Completed task {i+1}")
 
@@ -199,8 +200,9 @@ def run(court_codes=None, start_date=None, end_date=None, day_step=1, max_worker
 
 
 class Downloader:
-    def __init__(self, task: CourtDateTask):
+    def __init__(self, task: CourtDateTask, output_dir: Path):
         self.task = task
+        self.output_dir = output_dir
         self.root_url = "https://judgments.ecourts.gov.in"
         self.search_url = f"{self.root_url}/pdfsearch/?p=pdf_search/home/"
         self.captcha_url = f"{self.root_url}/pdfsearch/vendor/securimage/securimage_show.php"  # not lint skip/
@@ -489,6 +491,7 @@ class Downloader:
             )
             return self.solve_captcha(retries + 1, captcha_url)
         captch_text = result[0][1].strip()
+        print("Captcha text:", captch_text)
 
         if MATH_CAPTCHA:
             if self.is_math_expression(captch_text):
@@ -614,7 +617,7 @@ class Downloader:
         return response
 
     def get_pdf_output_path(self, pdf_fragment):
-        return output_dir / pdf_fragment.split("#")[0]
+        return self.output_dir / pdf_fragment.split("#")[0]
 
     def is_pdf_downloaded(self, pdf_fragment):
         pdf_metadata_path = self.get_pdf_output_path(pdf_fragment).with_suffix(".json")
@@ -765,7 +768,11 @@ if __name__ == "__main__":
         "--day_step", type=int, default=1, help="Number of days per chunk"
     )
     parser.add_argument("--max_workers", type=int, default=2, help="Number of workers")
+    parser.add_argument("--output_dir", type=str, default="./data", help="Base output directory")
+    parser.add_argument("--court_threads", type=int, default=5, help="Number of parallel courts to process")
     args = parser.parse_args()
+
+    court_codes_dict = get_court_codes()
 
     if args.court_codes:
         assert (
@@ -775,12 +782,30 @@ if __name__ == "__main__":
     elif args.court_code:
         court_codes = [args.court_code]
     else:
-        court_codes = get_court_codes()
+        court_codes = list(court_codes_dict.keys())
 
-    for court_code in court_codes:
+    # for court_code in court_codes:
+    #     court_name = court_codes_dict[court_code]
+    #     safe_court_name = court_name.replace(" ", "_")
+    #     output_dir = Path(args.output_dir) / safe_court_name
+    #     output_dir.mkdir(parents=True, exist_ok=True)
+    #     run(
+    #         [court_code], args.start_date, args.end_date, args.day_step, args.max_workers, output_dir
+    #     )
+
+    def process_court(court_code):
+        court_name = court_codes_dict[court_code]
+        safe_court_name = court_name.replace(" ", "_")
+        output_dir = Path(args.output_dir) / safe_court_name
+        output_dir.mkdir(parents=True, exist_ok=True)
         run(
-            court_codes, args.start_date, args.end_date, args.day_step, args.max_workers
+            [court_code], args.start_date, args.end_date, args.day_step, args.max_workers, output_dir
         )
+
+    # Use ThreadPoolExecutor to process multiple courts in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.court_threads) as executor:
+        # map automatically consumes the iterator and processes courts in parallel
+        executor.map(process_court, court_codes)
 
 """
 captcha prompt while downloading pdf seems to be different from session timeout
